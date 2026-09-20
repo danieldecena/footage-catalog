@@ -23,6 +23,14 @@ PHOTO_EXTS = frozenset({"JPG", "JPEG", "DNG", "HEIC"})
 ALL_EXTS = VIDEO_EXTS | PROXY_EXTS | PHOTO_EXTS
 CAMERADB_DIR = "_cameradb"
 
+# Directories this pipeline writes into the archive itself. Everything under
+# them is derived output -- filmstrips, caption frames, contact sheets -- and
+# indexing it made 106 of 142 "photos" in the catalog this tool's own JPEGs.
+# They carry no EXIF, no camera record and no duration, so they polluted the
+# photo role and anything reading it.
+DERIVED_DIRS = frozenset({CAMERADB_DIR, "_strips", "_strips2", "_caption",
+                          "LOST_CLIPS", "_agent"})
+
 
 @dataclass
 class ScanStats:
@@ -66,6 +74,10 @@ def scan_volume(conn: sqlite3.Connection, root: Path, kind: str = "external") ->
 
     for path in sorted(root.rglob("*")):
         if not path.is_file() or path.name.startswith("."):
+            continue
+        # Anything under a directory this pipeline writes is its own output,
+        # not footage off a camera.
+        if DERIVED_DIRS.intersection(path.relative_to(root).parts[:-1]):
             continue
         ext = path.suffix.lstrip(".").upper()
         if ext not in ALL_EXTS:

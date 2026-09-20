@@ -171,3 +171,32 @@ def test_missing_camera_db_is_not_an_error(tmp_path):
     plain = tmp_path / "plain"; plain.mkdir()
     archive = tmp_path / "archive"; archive.mkdir()
     scan.ingest_card(conn, plain, archive)
+
+
+def test_derived_output_is_not_indexed(tmp_path, make_video):
+    """The archive holds this pipeline's own JPEGs, which are not footage.
+
+    Filmstrips, caption frames and contact sheets have no EXIF, no camera
+    record and no duration. Indexing them as role='photo' made 106 of the
+    catalog's 142 photos this tool's own output.
+    """
+    conn = db.connect(tmp_path / "c.db")
+    root = tmp_path / "vol"; root.mkdir()
+    shutil.copy(make_video(name="real.mp4", seconds=1),
+                root / "DCIM" / "DJI_20260917040000_0000_D.MP4"
+                if (root / "DCIM").is_dir() else _dcim(root))
+    for d in ("_strips", "_strips2", "_caption", "LOST_CLIPS"):
+        (root / d).mkdir(parents=True, exist_ok=True)
+        (root / d / "0001.jpg").write_bytes(b"\xff\xd8\xff derived, not footage")
+
+    scan.scan_volume(conn, root)
+    rows = conn.execute("select rel_path, role from clip").fetchall()
+    paths = [r["rel_path"] for r in rows]
+    assert any(p.startswith("DCIM/") for p in paths), "the real clip must still index"
+    for d in ("_strips", "_strips2", "_caption", "LOST_CLIPS"):
+        assert not any(p.startswith(f"{d}/") for p in paths), f"{d} was indexed"
+
+
+def _dcim(root):
+    (root / "DCIM").mkdir(parents=True, exist_ok=True)
+    return root / "DCIM" / "DJI_20260917040000_0000_D.MP4"

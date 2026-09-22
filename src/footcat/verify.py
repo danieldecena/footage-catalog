@@ -11,6 +11,8 @@ import sqlite3
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .scan import VIDEO_EXTS
+
 TOLERANCE_S = 1.0
 
 
@@ -21,6 +23,9 @@ class VerifyResult:
     # Decoded cleanly, but with nothing independent to check the duration
     # against. NOT the same as verified -- see verify() below.
     unchecked: list = field(default_factory=list)
+    # Archive clips that are not on the card being imported. Formatting this
+    # card cannot touch them, so they are counted, never gated on.
+    off_card: int = 0
 
     @property
     def safe(self) -> bool:
@@ -41,17 +46,36 @@ def decodes(path: Path) -> float | None:
         return None
 
 
+def card_clips(card: Path) -> set[str]:
+    """Primary clip filenames on a card: exactly what a format destroys."""
+    return {p.name for p in card.rglob("*")
+            if p.is_file() and not p.name.startswith(".")
+            and p.suffix.lstrip(".").upper() in VIDEO_EXTS}
+
+
 def verify(conn: sqlite3.Connection, root: Path,
-           expected: dict[str, float] | None = None) -> VerifyResult:
+           expected: dict[str, float] | None = None,
+           only: set[str] | None = None) -> VerifyResult:
     """Decode every primary clip under root; compare to expected durations.
 
     `expected` maps filename -> duration in seconds (from the camera index).
+
+    `only` is the card's clip names. The gate answers "is this card safe to
+    format", so it is scoped to what is on the card. Checking the whole
+    archive meant 15 older clips whose camera index was never captured
+    blocked every card that came after them, forever, while having nothing
+    to do with any of those cards. None keeps the whole-archive check.
     """
     res = VerifyResult()
     rows = conn.execute(
         "select rel_path, filename, duration_s from clip"
         " where role='primary' and missing=0").fetchall()
+    seen: set[str] = set()
     for r in rows:
+        if only is not None and r["filename"] not in only:
+            res.off_card += 1
+            continue
+        seen.add(r["filename"])
         p = root / r["rel_path"]
         if not p.exists():
             res.bad.append((r["filename"], "file missing")); continue
@@ -74,12 +98,21 @@ def verify(conn: sqlite3.Connection, root: Path,
             res.bad.append((r["filename"],
                             f"duration {got:.1f}s vs expected {want:.1f}s")); continue
         res.ok.append(r["filename"])
+    # A clip on the card with no archive row was never copied, or failed to
+    # index. Iterating the archive alone would never see it, so it would
+    # pass by absence -- the card must be checked from its own side too.
+    for name in sorted((only or set()) - seen):
+        res.bad.append((name, "on the card but not in the archive"))
     return res
 
 
 def verdict(res: VerifyResult) -> str:
+    # Said either way, so a pass cannot hide how much of the archive it did
+    # not look at.
+    note = (f"\n  {res.off_card} archived clip(s) not on this card: not part of this check"
+            if res.off_card else "")
     if res.safe:
-        return f"SAFE TO FORMAT — {len(res.ok)}/{len(res.ok)} clips verified"
+        return f"SAFE TO FORMAT — {len(res.ok)}/{len(res.ok)} clips verified" + note
     n = len(res.bad) + len(res.unchecked)
     lines = [f"DO NOT FORMAT — {n} problem(s), {len(res.ok)} verified"]
     lines += [f"  {name}: {why}" for name, why in res.bad]
@@ -91,4 +124,4 @@ def verdict(res: VerifyResult) -> str:
         lines += [f"    {name}" for name, _ in res.unchecked[:5]]
         if len(res.unchecked) > 5:
             lines.append(f"    ... and {len(res.unchecked) - 5} more")
-    return "\n".join(lines)
+    return "\n".join(lines) + note

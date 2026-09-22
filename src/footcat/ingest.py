@@ -89,7 +89,10 @@ def run(card: Path, archive_root: Path, budget_s: float = 0,
             if rec.duration_ms:
                 expected[name] = rec.duration_ms / 1000
     log(f"camera records available for {len(expected)} clip(s)")
-    res = verify.verify(conn, archive_root, expected=expected)
+    # Scoped to this card: the question is whether formatting it loses
+    # anything. Clips already archived from earlier cards are not on it.
+    on_card = verify.card_clips(card) if card and card.is_dir() else None
+    res = verify.verify(conn, archive_root, expected=expected, only=on_card)
     out["verified"], out["bad"] = len(res.ok), len(res.bad)
     out["safe"] = res.safe
 
